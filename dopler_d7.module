@@ -1,0 +1,386 @@
+<?php
+
+use GuzzleHttp\Client as GuzzleClient;
+
+const DOPLER_TYPE_NODE = 'node';
+const DOPLER_TYPE_TERM = 'taxonomy_term';
+const DOPLER_TYPE_USER = 'user';
+const DOPLER_PERMISSION_NODE = 'dopler node';
+
+const DOPLER_PERMISSION_TERM = 'dopler taxonomy_term';
+
+const DOPLER_PERMISSION_USER = 'dopler user';
+
+function dopler_d7_permission(): array {
+  return [
+    'administer dopler'    => [
+      'title'       => t('Administer Dopler Module'),
+      'description' => t('Allow people to administer Dopler.<br/>Trusted roles only!'),
+    ],
+    DOPLER_PERMISSION_NODE => [
+      'title'       => t('Dopler Node Events'),
+      'description' => t('Log Node events for these roles'),
+    ],
+    DOPLER_PERMISSION_TERM => [
+      'title'       => t('Dopler Term Events'),
+      'description' => t('Log Term events for these roles'),
+    ],
+    DOPLER_PERMISSION_USER => [
+      'title'       => t('Dopler User Events'),
+      'description' => t('Log User events for these roles'),
+    ],
+  ];
+}
+
+function dopler_d7_menu(): array {
+  $items['admin/config/services/dopler'] = [
+    'title'            => 'Dopler Settings',
+    'description'      => 'Configure Dopler options',
+    'page callback'    => 'drupal_get_form',
+    'page arguments'   => ['dopler_admin_form'],
+    'access arguments' => ['administer dopler'],
+    'file'             => 'dopler.admin.inc',
+    'type'             => MENU_NORMAL_ITEM,
+  ];
+
+  // Custom FE event - posting here will send to Dopler Server
+  $items['dopler/api/custom'] = [
+    'title'           => 'Dopler Custom Event',
+    'description'     => 'Sends a custom (usually front-end)) event to Dopler',
+    'menu_name'       => 'dopler_d7_custom_event',
+    'page callback'   => '_dopler_d7_custom_event',
+    'access callback' => TRUE,
+  ];
+
+  return $items;
+}
+
+function dopler_admin_form_validate($form, &$form_state) {
+  $server_url = $form_state['values']['dopler_d7_server'];
+
+  if (!valid_url($server_url, TRUE)) {
+    form_set_error('dopler_d7_server',
+      t('The server URL does not appear to be a valid.  Please use a fully qualified host name'));
+  }
+
+  $user_token = $form_state['values']['dopler_d7_user_token'];
+  $parsed_token = explode('|', $user_token);
+  if ((count($parsed_token) !== 2) || (!is_numeric($parsed_token[0]))) {
+    form_set_error('dopler_d7_user_token', t('This does not look like a valid user token'));
+  }
+
+  $env_var = trim($form_state['values']['dopler_d7_server_environment_var']);
+  $env = trim($form_state['values']['dopler_d7_server_environment']);
+  if (($env_var === '') && ($env === '')) {
+    form_set_error('dopler_d7_server_environment',
+      t('If you do not have an $_SERVER environment variable, you must specify the environment'));
+  }
+}
+
+function dopler_d7_form_user_login_alter(&$form, &$form_state, $form_id) {
+  $form["#validate"][] = '_dopler_d7_login_validate';
+}
+
+function dopler_d7_entity_view($entity, $type, $view_mode, $langcode) {
+  $paths = variable_get('dopler_viewed_paths', '');
+  if (trim($paths) === '') {
+    return;
+  }
+
+  if (!_dopler_proceed($type)) {
+    return;
+  }
+
+  $paths = str_replace("\r", '', $paths);
+  $paths = explode(PHP_EOL, $paths);
+
+  $path_alias = '/' . drupal_get_path_alias();
+  if (!in_array($path_alias, $paths, TRUE)) {
+    return;
+  }
+
+  $title = '';
+  $bundle = '';
+  $id = 0;
+
+  _dopler_d7_get_entity_info($type, $entity, $bundle, $id, $title);
+  _dopler_d7_log($type, $bundle, $id, $title, 'viewed');
+}
+
+function dopler_d7_entity_insert($entity, $type) {
+  if (!_dopler_proceed($type)) {
+    return;
+  }
+
+  $title = '';
+  $bundle = '';
+  $id = 0;
+
+  _dopler_d7_get_entity_info($type, $entity, $bundle, $id, $title);
+  _dopler_d7_log($type, $bundle, $id, $title, 'insert');
+}
+
+function dopler_d7_entity_update($entity, $type) {
+  if (!_dopler_proceed($type)) {
+    return;
+  }
+
+  $title = '';
+  $bundle = '';
+  $id = 0;
+
+  _dopler_d7_get_entity_info($type, $entity, $bundle, $id, $title);
+  _dopler_d7_log($type, $bundle, $id, $title, 'update');
+}
+
+function dopler_d7_entity_delete($entity, $type) {
+  if (!_dopler_proceed($type)) {
+    return;
+  }
+
+  $title = '';
+  $bundle = '';
+  $id = 0;
+
+  _dopler_d7_get_entity_info($type, $entity, $bundle, $id, $title);
+  _dopler_d7_log($type, $bundle, $id, $title, 'delete');
+}
+
+function dopler_d7_user_login(&$edit, $account) {
+  if (!_dopler_proceed($type)) {
+    return;
+  }
+
+  $title = '';
+  $bundle = '';
+  $id = 0;
+
+  _dopler_d7_get_entity_info('user', $account, $bundle, $id, $title);
+  _dopler_d7_log('user', $bundle, $id, $title, 'login');
+}
+
+function dopler_d7_user_logout($account) {
+  if (!_dopler_proceed($type)) {
+    return;
+  }
+
+  $title = '';
+  $bundle = '';
+  $id = 0;
+
+  _dopler_d7_get_entity_info('user', $account, $bundle, $id, $title);
+  _dopler_d7_log('user', $bundle, $id, $title, 'logout');
+}
+
+function _dopler_d7_login_validate($form, &$form_state) {
+  if (!_dopler_proceed('user')) {
+    return;
+  }
+
+  if (!empty($form_state['uid'])) {
+    return;
+  }
+
+  $title = '';
+  $bundle = $form_state["input"]["name"];
+  $id = 0;
+
+  // The username was an e-mail address, lets try to get the username
+  if (strpos($bundle, '@') !== FALSE) {
+    $user = user_load_by_mail($bundle);
+    if ($user) {
+      $bundle = $user->name;
+      $id = $user->uid;
+    }
+  }
+
+  _dopler_d7_log('user', $bundle, $id, $title, 'login-fail');
+}
+
+function _dopler_d7_custom_event() {
+  $body = file_get_contents('php://input');
+
+  try {
+    $json_data = json_decode($body, TRUE, 512, JSON_THROW_ON_ERROR);
+  } catch (Exception $exception) {
+    drupal_json_output(['error' => 'could not decode event data']);
+  }
+
+  $type = $json_data['type'] ?? NULL;
+  $bundle = $json_data['bundle'] ?? NULL;
+  $id = $json_data['id'] ?? NULL;
+  $title = $json_data['title'] ?? NULL;
+  $event = $json_data['event'] ?? NULL;
+
+  if (!$type || !$bundle || !$event) {
+    drupal_json_output(['error' => 'missing event information']);
+  }
+
+  if (!_dopler_d7_enabled($type)) {
+    drupal_json_output(['error' => 'dopler disabled or ' . $type . ' events not supported']);
+  }
+
+  if (!_dopler_check_permission($type)) {
+    drupal_json_output(['error' => 'dopler ' . $type . ' events disabled for this user']);
+  }
+
+  unset($json_data['type'], $json_data['bundle'], $json_data['id'], $json_data['event']);
+  _dopler_d7_log($type, $bundle, $id, $title, $event, $json_data);
+  drupal_json_output(['success' => 'sent the event to dopler server']);
+}
+
+function _dopler_d7_get_entity_info($type, $entity, &$bundle, &$id, &$title) {
+  switch ($type) {
+    case DOPLER_TYPE_NODE:
+    {
+      $bundle = $entity->type;
+      $id = $entity->nid;
+      $title = $entity->title;
+      break;
+    }
+    case DOPLER_TYPE_TERM:
+    {
+      $bundle = $entity->vocabulary_machine_name;
+      $id = $entity->tid;
+      $title = $entity->name;
+      break;
+    }
+    case DOPLER_TYPE_USER:
+    {
+      $bundle = 'user';
+      $id = $entity->uid;
+      $title = $entity->name;
+
+      break;
+    }
+  }
+}
+
+function _dopler_d7_log($type, $bundle, $id, $title, $event, $data = []) {
+  $server = variable_get('dopler_d7_server');
+  $account_token = variable_get('dopler_d7_account_token');
+  $user_token = variable_get('dopler_d7_user_token');
+
+  global $user;
+
+  $user_name = $user->name ?? get_current_user();
+  if (($user_name === 'root') && ($type === 'user')) {
+    $user_name = $bundle;
+  }
+
+  $json_data = '';
+  if (!empty($data)) {
+    try {
+      $json_data = json_encode($data, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT, 512);
+    } catch (Exception $exception) {
+      _dopler_d7_write_debug($exception->getMessage());
+    }
+  }
+
+  $env_var = trim(variable_get('dopler_d7_server_environment_var'));
+  $env = '';
+  if ($env_var !== '') {
+    $env = strtolower(trim($_SERVER[$env_var]));
+  }
+
+  if ($env === '') {
+    $env = strtolower(trim(variable_get('dopler_d7_server_environment', 'local')));
+  }
+
+  $url = $_SERVER["REQUEST_URI"];
+  $query_string = '';
+  $query_pos = strpos($url, '?');
+  if ($query_pos !== FALSE) {
+    $query_string = substr($url, $query_pos + 1);
+    $url = substr($url, 0, $query_pos);
+  }
+
+  $request_data = [
+    'host'            => strtolower($_SERVER["HTTP_HOST"]),
+    'server_name'     => strtolower($_SERVER["SERVER_NAME"]),
+    'environment'     => $env,
+    'platform'        => VERSION,
+    'user_identifier' => $user_name,
+    'entity'          => $type,
+    'bundle'          => $bundle,
+    'resource_id'     => $id,
+    'resource_title'  => $title,
+    'event'           => $event,
+    'event_time'      => time(),
+    'remote_ip'       => $_SERVER["REMOTE_ADDR"],
+    'url'             => $url,
+    'query'           => $query_string,
+    'user_agent'      => $_SERVER["HTTP_USER_AGENT"] ?? '',
+    'log_session'     => $user->sid ?? session_id(),
+    'token'           => $account_token,
+    'json_data'       => $json_data,
+  ];
+
+  try {
+    libraries_load('guzzle');
+
+    $client = new GuzzleClient([
+      'headers'         => [
+        'Content-Type'  => 'application/json',
+        'Authorization' => 'Bearer ' . $user_token,
+      ],
+      'cookies'         => FALSE,
+      'allow_redirects' => FALSE,
+      'verify'          => FALSE,
+    ]);
+
+    $response = $client->request('POST', $server . '/api/v1/log', [
+      'json' => $request_data,
+    ]);
+
+    if ($response->getStatusCode() !== 202) {
+      _dopler_d7_write_debug('activity log not accepted by dopler server');
+    }
+  } catch (Exception $exception) {
+    _dopler_d7_write_debug($exception->getMessage());
+  }
+}
+
+function _dopler_d7_enabled_for($type): bool {
+  return (bool) variable_get('dopler_d7_' . $type, FALSE);
+}
+
+function _dopler_d7_enabled($type): bool {
+  if (trim(variable_get('dopler_d7_server')) === '') {
+    return FALSE;
+  }
+
+  if (trim(variable_get('dopler_d7_account_token')) === '') {
+    return FALSE;
+  }
+
+  if (trim(variable_get('dopler_d7_user_token')) === '') {
+    return FALSE;
+  }
+
+  if (!_dopler_d7_enabled_for($type)) {
+    return FALSE;
+  }
+
+  return (bool) variable_get('dopler_d7_status') !== FALSE;
+}
+
+function _dopler_check_permission($type): bool {
+  $permission = 'dopler ' . $type;
+
+  return user_access($permission);
+}
+
+function _dopler_proceed($type): bool {
+  if (!_dopler_d7_enabled($type)) {
+    return FALSE;
+  }
+
+  return _dopler_check_permission($type);
+}
+
+function _dopler_d7_write_debug($message) {
+  watchdog('dopler', $message, [
+    '%ip' => ip_address(),
+  ], WATCHDOG_DEBUG);
+}
