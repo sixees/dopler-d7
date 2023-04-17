@@ -1,0 +1,7 @@
+name = Dopler for D7
+description = Drupal OPerations loggER for Drupal 7
+package = Sixees
+version = 1.0.0
+core = 7.x
+configure = admin/config/services/dopler
+dependencies[] = libraries
